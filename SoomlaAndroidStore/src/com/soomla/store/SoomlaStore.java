@@ -22,6 +22,7 @@ import com.soomla.BusProvider;
 import com.soomla.SoomlaApp;
 import com.soomla.SoomlaConfig;
 import com.soomla.SoomlaUtils;
+import com.soomla.data.KeyValueStorage;
 import com.soomla.store.billing.IIabService;
 import com.soomla.store.billing.IabCallbacks;
 import com.soomla.store.billing.IabException;
@@ -29,6 +30,7 @@ import com.soomla.store.billing.IabPurchase;
 import com.soomla.store.billing.IabSkuDetails;
 import com.soomla.store.data.StorageManager;
 import com.soomla.store.data.StoreInfo;
+import com.soomla.store.data.VirtualGoodsStorage;
 import com.soomla.store.domain.MarketItem;
 import com.soomla.store.domain.PurchasableVirtualItem;
 import com.soomla.store.domain.VirtualItem;
@@ -52,7 +54,9 @@ import com.soomla.store.purchaseTypes.PurchaseWithMarket;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * This class holds the basic assets needed to operate the Store.
@@ -148,6 +152,71 @@ public class SoomlaStore {
         });
     }
 
+    private Set<String> getSkus(List<IabPurchase> purchases)
+    {
+        Set<String> skus = new HashSet<String>();
+
+        if (purchases != null) {
+            for (IabPurchase iab : purchases) {
+                skus.add(iab.getSku());
+            }
+        }
+        return skus;
+    }
+
+    /**
+     * Returns items that are locally registered as purchased, but have not been recognised
+     * in the list of purchased items from the remote store.
+     *
+     * @param remotePurchases purchase data obtained from the remote store
+     * @return a Set of PurchaseableVirtualItems that have not been recognised by the remote store
+     */
+    private Set<PurchasableVirtualItem> getMissingPurchasedItems(List<IabPurchase> remotePurchases)
+    {
+        Set<PurchasableVirtualItem> missingItems = new HashSet<PurchasableVirtualItem>();
+
+        //storedKeys uses ItemIds
+        List<String> storedKeys = KeyValueStorage.getEncryptedKeys();
+
+        if (storedKeys != null) {
+            //skus are ProductIds
+            Set<String> skus = getSkus(remotePurchases);
+
+            for (String s : storedKeys) {
+                //we are looking for keys in the form goods.itemid.balance
+                String itemId = VirtualGoodsStorage.getItemIdFromBalanceId(s);
+
+                if (itemId != null) {
+                    try
+                    {
+                        PurchasableVirtualItem pvi = (PurchasableVirtualItem) StoreInfo.getVirtualItem(itemId);
+                        if (StorageManager.getVirtualItemStorage(pvi).getBalance(pvi.getItemId()) > 0 && skus.contains(pvi.getID()) == false) {
+                            missingItems.add(pvi);
+                        }
+                    } catch (VirtualItemNotFoundException e) {
+                        String msg = "(restorePurchases/missingKeys) Couldn't find a "
+                                + "purchasable item associated with: " + itemId;
+                        SoomlaUtils.LogError(TAG, msg);
+                    }
+                }
+            }
+        }
+        return missingItems;
+    }
+
+    public void revokeMissingGoodsPurchases(List<IabPurchase> purchases)
+    {
+        Set<PurchasableVirtualItem> missingPurchasedItems = getMissingPurchasedItems(purchases);
+
+        for (PurchasableVirtualItem pvi : missingPurchasedItems) {
+            SoomlaUtils.LogDebug(TAG, "Missing remote purchase for:[" + pvi.getItemId() + "]");
+            StorageManager.getVirtualItemStorage(pvi).setBalance(pvi.getItemId(), 0);
+
+            //No payload exists to send to this event, so passing null
+            BusProvider.getInstance().post(new MarketRefundEvent(pvi, null));
+        }
+    }
+
     /**
      * Restoring old purchases for the current user (device).
      */
@@ -173,6 +242,10 @@ public class SoomlaStore {
                             @Override
                             public void success(List<IabPurchase> purchases) {
                                 SoomlaUtils.LogDebug(TAG, "Transactions restored");
+
+                                if (!StoreConfig.friendlyRefunds) {
+                                    revokeMissingGoodsPurchases(purchases);
+                                }
 
                                 if (purchases.size() > 0) {
 

@@ -239,18 +239,27 @@ public class VirtualGoodsStorage extends VirtualItemStorage{
         }
     }
 
+    public static String getItemIdFromBalanceId(String balanceId) {
+        if (balanceId.startsWith(DB_KEY_GOOD_PREFIX) && balanceId.endsWith(DB_KEY_GOOD_BALANCE_SUFFIX)) {
+            return balanceId.substring(DB_KEY_GOOD_PREFIX.length(), balanceId.length() - DB_KEY_GOOD_BALANCE_SUFFIX.length());
+        }
+        else return null;
+    }
 
     private static String keyGoodBalance(String itemId) {
-        return DB_KEY_GOOD_PREFIX + itemId + ".balance";
+        return DB_KEY_GOOD_PREFIX + itemId + DB_KEY_GOOD_BALANCE_SUFFIX;
     }
 
     private static String keyGoodEquipped(String itemId) {
-        return DB_KEY_GOOD_PREFIX + itemId + ".equipped";
+        return DB_KEY_GOOD_PREFIX + itemId + DB_KEY_GOOD_EQUIPPED_SUFFIX;
     }
 
     private static String keyGoodUpgrade(String itemId) {
-        return DB_KEY_GOOD_PREFIX + itemId + ".currentUpgrade";
+        return DB_KEY_GOOD_PREFIX + itemId + DB_KEY_GOOD_UPGRADE_SUFFIX;
     }
 
     public final static String DB_KEY_GOOD_PREFIX = "good.";
+    public final static String DB_KEY_GOOD_BALANCE_SUFFIX = ".balance";
+    public final static String DB_KEY_GOOD_EQUIPPED_SUFFIX = ".equipped";
+    public final static String DB_KEY_GOOD_UPGRADE_SUFFIX = ".currentUpgrade";
 }
