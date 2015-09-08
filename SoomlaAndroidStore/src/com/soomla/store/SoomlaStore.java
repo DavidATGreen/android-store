@@ -50,6 +50,7 @@ import com.soomla.store.events.RestoreTransactionsStartedEvent;
 import com.soomla.store.events.SoomlaStoreInitializedEvent;
 import com.soomla.store.events.UnexpectedStoreErrorEvent;
 import com.soomla.store.exceptions.VirtualItemNotFoundException;
+import com.soomla.store.purchaseTypes.PurchaseType;
 import com.soomla.store.purchaseTypes.PurchaseWithMarket;
 
 import java.util.ArrayList;
@@ -158,6 +159,7 @@ public class SoomlaStore {
 
         if (purchases != null) {
             for (IabPurchase iab : purchases) {
+                SoomlaUtils.LogDebug(TAG, "Remote purchase productID [" + iab.getSku() + "]");
                 skus.add(iab.getSku());
             }
         }
@@ -189,11 +191,25 @@ public class SoomlaStore {
                 if (itemId != null) {
                     try
                     {
-                        PurchasableVirtualItem pvi = (PurchasableVirtualItem) StoreInfo.getVirtualItem(itemId);
-                        if (StorageManager.getVirtualItemStorage(pvi).getBalance(pvi.getItemId()) > 0 && skus.contains(pvi.getID()) == false) {
-                            missingItems.add(pvi);
+                        VirtualItem vi = StoreInfo.getVirtualItem(itemId);
+                        if (vi instanceof PurchasableVirtualItem)
+                        {
+                            PurchasableVirtualItem pvi = (PurchasableVirtualItem) StoreInfo.getVirtualItem(itemId);
+                            PurchaseType purchaseType = pvi.getPurchaseType();
+
+                            if (purchaseType instanceof PurchaseWithMarket)
+                            {
+                                String productId = ((PurchaseWithMarket)purchaseType).getMarketItem().getProductId();
+
+                                if (StorageManager.getVirtualItemStorage(pvi).getBalance(pvi.getItemId()) > 0 &&
+                                        skus.contains(productId) == false) {
+                                    SoomlaUtils.LogDebug(TAG, "Remote purchases did not contain productID [" + pvi.getID() + "]");
+                                    missingItems.add(pvi);
+                                }
+                            }
                         }
                     } catch (VirtualItemNotFoundException e) {
+                        mError = true;
                         String msg = "(restorePurchases/missingKeys) Couldn't find a "
                                 + "purchasable item associated with: " + itemId;
                         SoomlaUtils.LogError(TAG, msg);
@@ -238,39 +254,34 @@ public class SoomlaStore {
                         SoomlaUtils.LogDebug(TAG,
                                 "Setup successful, restoring purchases");
 
-                        IabCallbacks.OnRestorePurchasesListener restorePurchasesListener = new IabCallbacks.OnRestorePurchasesListener() {
+                        IabCallbacks.OnRestorePurchasesListener restorePurchasesListener =
+                                new IabCallbacks.OnRestorePurchasesListener() {
                             @Override
                             public void success(List<IabPurchase> purchases) {
                                 SoomlaUtils.LogDebug(TAG, "Transactions restored");
 
-                                if (!StoreConfig.friendlyRefunds) {
-                                    revokeMissingGoodsPurchases(purchases);
-                                }
+                                try {
+                                    mError = false;
 
-                                if (purchases.size() > 0) {
+                                    if (purchases.size() > 0) {
 
-                                    if (SoomlaConfig.logDebug) {
-                                        String ownedSkus = "";
-                                        for (IabPurchase purchase : purchases) {
-                                            ownedSkus += purchase.getSku() + " / ";
+                                        if (SoomlaConfig.logDebug) {
+                                            String ownedSkus = "";
+                                            for (IabPurchase purchase : purchases) {
+                                                ownedSkus += purchase.getSku() + " / ";
+                                            }
+                                            SoomlaUtils.LogDebug(TAG, "Got owned items: " + ownedSkus);
                                         }
-                                        SoomlaUtils.LogDebug(TAG, "Got owned items: " + ownedSkus);
+
+                                        handleSuccessfulPurchases(purchases, null);
                                     }
 
-                                    handleSuccessfulPurchases(purchases, new HandleSuccessfulPurchasesFinishedHandler() {
-                                        @Override
-                                        public void onFinished() {
-
-                                            // Restore transactions always finished successfully even if
-                                            // something wrong happened when handling a specific item.
-
-                                            BusProvider.getInstance().post(
-                                                    new RestoreTransactionsFinishedEvent(true));
-                                        }
-                                    });
-                                } else {
+                                    if (!StoreConfig.friendlyRefunds) {
+                                        revokeMissingGoodsPurchases(purchases);
+                                    }
+                                } finally {
                                     BusProvider.getInstance().post(
-                                            new RestoreTransactionsFinishedEvent(true));
+                                            new RestoreTransactionsFinishedEvent(!mError));
                                 }
                             }
 
@@ -286,6 +297,7 @@ public class SoomlaStore {
                         try {
                             mInAppBillingService.restorePurchasesAsync(restorePurchasesListener);
                         } catch (IllegalStateException ex) {
+                            mError = true;
                             SoomlaUtils.LogError(TAG, "Can't proceed with restorePurchases. error: " + ex.getMessage());
                             restorePurchasesListener.fail("Can't proceed with restorePurchases. error: " + ex.getMessage());
                         }
@@ -317,6 +329,7 @@ public class SoomlaStore {
      */
     private void refreshMarketItemsDetails(final boolean followedByRestoreTransactions) {
         if (mInAppBillingService == null) {
+            mError = true;
             SoomlaUtils.LogError(TAG, "Billing service is not loaded. Can't invoke refreshMarketItemsDetails.");
             return;
         }
@@ -367,6 +380,7 @@ public class SoomlaStore {
                                                     marketItems.add(mi);
                                                     virtualItems.add(pvi);
                                                 } catch (VirtualItemNotFoundException e) {
+                                                    mError = true;
                                                     String msg = "(refreshInventory) Couldn't find a "
                                                             + "purchasable item associated with: " + productId;
                                                     SoomlaUtils.LogError(TAG, msg);
@@ -384,6 +398,7 @@ public class SoomlaStore {
 
                                     @Override
                                     public void fail(String message) {
+                                        mError = true;
                                         SoomlaUtils.LogError(TAG, "Market items details failed to refresh " + message);
 
                                         BusProvider.getInstance().post(new MarketItemsRefreshFailedEvent(message));
@@ -401,6 +416,7 @@ public class SoomlaStore {
                         try {
                             mInAppBillingService.fetchSkusDetailsAsync(purchasableProductIds, fetchSkusDetailsListener);
                         } catch (IllegalStateException ex) {
+                            mError = true;
                             SoomlaUtils.LogError(TAG, "Can't proceed with fetchSkusDetails. error: " + ex.getMessage());
                             fetchSkusDetailsListener.fail("Can't proceed with fetchSkusDetails. error: " + ex.getMessage());
 
@@ -621,6 +637,7 @@ public class SoomlaStore {
         try {
             pvi = StoreInfo.getPurchasableItem(sku);
         } catch (VirtualItemNotFoundException e) {
+            mError = true;
             SoomlaUtils.LogError(TAG, "(handleSuccessfulPurchase - purchase or query-inventory) "
                     + "ERROR : Couldn't find the " +
                     " VirtualCurrencyPack OR MarketItem  with productId: " + sku +
@@ -668,6 +685,7 @@ public class SoomlaStore {
             PurchasableVirtualItem v = StoreInfo.getPurchasableItem(sku);
             BusProvider.getInstance().post(new MarketPurchaseCancelledEvent(v));
         } catch (VirtualItemNotFoundException e) {
+            mError = true;
             SoomlaUtils.LogError(TAG, "(purchaseActionResultCancelled) ERROR : Couldn't find the "
                     + "VirtualCurrencyPack OR MarketItem  with productId: " + sku
                     + ". It's unexpected so an unexpected error is being emitted.");
@@ -686,6 +704,7 @@ public class SoomlaStore {
                 mInAppBillingService.consume(purchase);
             }
         } catch (IabException e) {
+            mError = true;
             SoomlaUtils.LogDebug(TAG, "Error while consuming: itemId: " + pvi.getItemId() +
                     "   productId: " + purchase.getSku());
             SoomlaUtils.LogError(TAG, e.getMessage());
@@ -706,6 +725,7 @@ public class SoomlaStore {
             assert ai.metaData != null;
             iabServiceClassName = ai.metaData.getString("billing.service");
         } catch (Exception e) {
+            mError = true;
             SoomlaUtils.LogError(TAG, "Failed to load billing service from AndroidManifest.xml, NullPointer: " + e.getMessage());
             return null;
         }
@@ -727,6 +747,7 @@ public class SoomlaStore {
      * @param message error message.
      */
     private void handleErrorResult(UnexpectedStoreErrorEvent.ErrorCode errorCode, String message) {
+        mError = true;
         BusProvider.getInstance().post(new UnexpectedStoreErrorEvent(errorCode));
         SoomlaUtils.LogError(TAG, "ERROR: SoomlaStore failure: " + message);
     }
@@ -790,6 +811,7 @@ public class SoomlaStore {
 
     /* Private Members */
 
+    private boolean mError = false;
     private static final String TAG = "SOOMLA SoomlaStore"; //used for Log messages
     private boolean mInitialized = false;
     private IIabService mInAppBillingService;
